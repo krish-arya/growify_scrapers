@@ -2,7 +2,6 @@ import streamlit as st
 import pandas as pd
 import re
 import time
-import random
 import os
 import requests
 from apify_client import ApifyClient
@@ -39,37 +38,58 @@ def create_driver():
 
 # Engagement Rate Function
 def get_engagement_rate(username):
+    driver = create_driver()
     try:
-        driver = create_driver()
         driver.get("https://www.clickanalytic.com/free-instagram-engagement-calculator/")
+
         input_box = WebDriverWait(driver, 15).until(
             EC.presence_of_element_located((By.ID, "username"))
         )
         input_box.clear()
         input_box.send_keys(username)
+
         submit_btn = WebDriverWait(driver, 10).until(
             EC.element_to_be_clickable((By.XPATH, "//button[contains(text(), 'Check Engagement Rate')]"))
         )
         submit_btn.click()
 
-        result_block = WebDriverWait(driver, 15).until(
-            EC.visibility_of_element_located((By.XPATH, "//div[contains(@class,'et_pb_text_inner') and contains(.,'%')]"))
-        )
+        WebDriverWait(driver, 20).until(lambda d: "%" in d.page_source)
+        time.sleep(3)
 
-        match = re.search(r"\d+\.?\d*%", result_block.text)
-        rate = match.group(0) if match else ""
+        result_blocks = driver.find_elements(By.XPATH, "//div[contains(@class,'et_pb_text_inner')]")
+        for block in result_blocks:
+            if "%" in block.text:
+                match = re.search(r"\d+\.?\d*%", block.text)
+                if match:
+                    rate = match.group(0)
+                    driver.quit()
+                    return rate
+
         driver.quit()
-        return rate
+        return "Engagement rate not found."
     except Exception as e:
         driver.quit()
         return f"Error: {e}"
 
+# Poll for actor run completion
+def wait_for_actor_run(client, run_id, timeout=60):
+    start_time = time.time()
+    while time.time() - start_time < timeout:
+        run = client.run(run_id).get()
+        if run["status"] == "SUCCEEDED":
+            return run["defaultDatasetId"]
+        elif run["status"] in ["FAILED", "ABORTED", "TIMED-OUT"]:
+            raise Exception(f"Actor run failed with status: {run['status']}")
+        time.sleep(2)
+    raise TimeoutError("Apify actor run did not finish in time.")
+
 # Apify Instagram Info Function
 def fetch_instagram_info(usernames):
     client = ApifyClient(API_TOKEN)
-    run = client.actor(ACTOR_ID).call(run_input={"usernames": usernames})
+    run = client.actor(ACTOR_ID).start(run_input={"usernames": usernames})
+    dataset_id = wait_for_actor_run(client, run["id"])
     info = {}
-    for item in client.dataset(run["defaultDatasetId"]).iterate_items():
+    for item in client.dataset(dataset_id).iterate_items():
         u = item.get("username")
         if u:
             info[u] = item
@@ -111,10 +131,7 @@ def detect_cms(url):
     try:
         response = requests.get(
             "https://whatcms.org/APIEndpoint/Detect",
-            params={
-                "key": WHATCMS_API,
-                "url": url
-            },
+            params={"key": WHATCMS_API, "url": url},
             timeout=10
         )
         data = response.json()
@@ -132,12 +149,29 @@ def detect_cms(url):
 st.set_page_config(page_title="Instagram & Designer Info", layout="centered")
 st.title("🎯 Instagram & Designer Intelligence Tool")
 
-# Instagram Info
+# Initialize session state
+for key in ["insta_usernames", "username", "designer_names", "insta_info", "engagement_rate"]:
+    if key not in st.session_state:
+        st.session_state[key] = ""
+
+if "search_results" not in st.session_state:
+    st.session_state.search_results = {}
+
+if "cms_results" not in st.session_state:
+    st.session_state.cms_results = {}
+
+if "selected_links" not in st.session_state:
+    st.session_state.selected_links = {}
+
+# Instagram Info Section
 st.header("📸 Instagram Handle Lookup")
-insta_usernames = st.text_area("Enter Instagram Handles (comma separated)", "").strip()
+st.session_state["insta_usernames"] = st.text_area(
+    "Enter Instagram Handles (comma separated)",
+    value=st.session_state["insta_usernames"]
+)
 
 if st.button("Fetch Instagram Info"):
-    usernames = [u.strip().lstrip('@') for u in insta_usernames.split(",") if u.strip()]
+    usernames = [u.strip().lstrip("@") for u in st.session_state["insta_usernames"].split(",") if u.strip()]
     if usernames:
         info = fetch_instagram_info(usernames)
         df = pd.DataFrame([
@@ -153,32 +187,35 @@ if st.button("Fetch Instagram Info"):
                 "Bio": info[u].get("biography")
             } for u in usernames if u in info
         ])
-        st.dataframe(df)
+        st.session_state["insta_info"] = df
 
-# Engagement Rate
+if isinstance(st.session_state["insta_info"], pd.DataFrame):
+    st.dataframe(st.session_state["insta_info"])
+
+# Engagement Rate Section
 st.header("📊 Engagement Rate Calculator")
-username = st.text_input("Enter Instagram Handle (single)")
+st.session_state["username"] = st.text_input(
+    "Enter Instagram Handle (single)",
+    value=st.session_state["username"]
+)
+
 if st.button("Calculate Engagement Rate"):
-    clean_user = username.strip().lstrip("@")
+    clean_user = st.session_state["username"].strip().lstrip("@")
     if clean_user:
-        rate = get_engagement_rate(clean_user)
-        st.success(f"Engagement Rate: {rate}")
+        st.session_state["engagement_rate"] = get_engagement_rate(clean_user)
 
-# Designer Search and CMS Check
-# Designer Search and CMS Check
+if st.session_state["engagement_rate"]:
+    st.success(f"Engagement Rate: {st.session_state['engagement_rate']}")
+
+# Designer Search + CMS Detection
 st.header("🎨 Designer Search Links + CMS Detection")
-designer_names = st.text_area("Enter Designer Names (one per line)", "")
-
-if "cms_results" not in st.session_state:
-    st.session_state.cms_results = {}
-
-if "selected_links" not in st.session_state:
-    st.session_state.selected_links = {}
+st.session_state["designer_names"] = st.text_area(
+    "Enter Designer Names (one per line)",
+    value=st.session_state["designer_names"]
+)
 
 if st.button("Search Designers"):
-    names = [n.strip() for n in designer_names.strip().split("\n") if n.strip()]
-    st.session_state.search_results = {}
-
+    names = [n.strip() for n in st.session_state["designer_names"].split("\n") if n.strip()]
     for name in names:
         links = fetch_top_links(f"{name} designer official website")
         st.session_state.search_results[name] = links
@@ -188,7 +225,11 @@ if "search_results" in st.session_state:
     for name, links in st.session_state.search_results.items():
         if links:
             st.subheader(f"{name}")
-            selected_link = st.radio(f"Top links for {name}", links, key=f"radio_{name}")
+            selected_link = st.radio(
+                f"Top links for {name}", links,
+                key=f"radio_{name}",
+                index=0
+            )
             st.session_state.selected_links[name] = selected_link
 
             if (name, selected_link) not in st.session_state.cms_results:
