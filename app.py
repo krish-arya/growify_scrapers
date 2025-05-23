@@ -83,10 +83,11 @@ def wait_for_actor_run(client, run_id, timeout=60):
         time.sleep(2)
     raise TimeoutError("Apify actor run did not finish in time.")
 
-# Apify Instagram Info Function
+# Apify Instagram Info Function (FIXED HERE)
 def fetch_instagram_info(usernames):
     client = ApifyClient(API_TOKEN)
-    run = client.actor(ACTOR_ID).start(run_input={"usernames": usernames})
+    run = client.actor(ACTOR_ID).call(run_input={"usernames": usernames})
+  # Positional input
     dataset_id = wait_for_actor_run(client, run["id"])
     info = {}
     for item in client.dataset(dataset_id).iterate_items():
@@ -94,6 +95,7 @@ def fetch_instagram_info(usernames):
         if u:
             info[u] = item
     return info
+
 
 # DuckDuckGo Top 3 Links
 def fetch_top_links(query):
@@ -108,13 +110,16 @@ def fetch_top_links(query):
         search_bar.send_keys(query)
         driver.find_element(By.ID, "search_button_homepage").click()
 
-        results = WebDriverWait(driver, 10).until(
-            EC.presence_of_all_elements_located((By.CSS_SELECTOR, "a.result__url"))
+        # Wait for web-result blocks to appear
+        WebDriverWait(driver, 10).until(
+            EC.presence_of_all_elements_located((By.CSS_SELECTOR, "div.web-result"))
         )
+        result_blocks = driver.find_elements(By.CSS_SELECTOR, "div.web-result")
 
         top_links = []
-        for result in results:
-            href = result.get_attribute("href")
+        for block in result_blocks:
+            anchor = block.find_element(By.CSS_SELECTOR, "a.result__url")
+            href = anchor.get_attribute("href")
             if href and not any(domain in href for domain in ["instagram.com", "twitter.com", "x.com", "youtube.com", "youtu.be"]):
                 top_links.append(href)
             if len(top_links) == 3:
@@ -174,19 +179,17 @@ if st.button("Fetch Instagram Info"):
     usernames = [u.strip().lstrip("@") for u in st.session_state["insta_usernames"].split(",") if u.strip()]
     if usernames:
         info = fetch_instagram_info(usernames)
-        df = pd.DataFrame([
-            {
-                "Username": u,
-                "Full Name": info[u].get("fullName"),
-                "Followers": info[u].get("followersCount"),
-                "Following": info[u].get("followsCount"),
-                "Verified": info[u].get("verified"),
-                "Business": info[u].get("isBusinessAccount"),
-                "Joined Recently": info[u].get("joinedRecently"),
-                "URL": info[u].get("url"),
-                "Bio": info[u].get("biography")
-            } for u in usernames if u in info
-        ])
+        df = pd.DataFrame([{
+            "Username": u,
+            "Full Name": info[u].get("fullName"),
+            "Followers": info[u].get("followersCount"),
+            "Following": info[u].get("followsCount"),
+            "Verified": info[u].get("verified"),
+            "Business": info[u].get("isBusinessAccount"),
+            "Joined Recently": info[u].get("joinedRecently"),
+            "URL": info[u].get("url"),
+            "Bio": info[u].get("biography")
+        } for u in usernames if u in info])
         st.session_state["insta_info"] = df
 
 if isinstance(st.session_state["insta_info"], pd.DataFrame):
@@ -237,7 +240,7 @@ if "search_results" in st.session_state:
                 st.session_state.cms_results[(name, selected_link)] = (cms, confidence)
 
             cms, confidence = st.session_state.cms_results.get((name, selected_link), ("Unknown", "N/A"))
-            st.write(f"**Selected Link:** [{selected_link}]({selected_link})")
-            st.write(f"**CMS:** {cms} | **Confidence:** {confidence}")
+            st.write(f"*Selected Link:* [{selected_link}]({selected_link})")
+            st.write(f"*CMS:* {cms} | *Confidence:* {confidence}")
         else:
             st.warning(f"No valid links found for {name}.")
