@@ -25,20 +25,48 @@ This is a **Streamlit-based web app** designed to help users gather detailed ins
 
 ## 📦 Installation
 
-### 1. Clone the repository
+1. **Clone the repository**
 
-```bash
-git clone https://github.com/yourusername/insta-designer-intelligence.git
-cd insta-designer-intelligence
+    ```bash
+    git clone https://github.com/yourusername/insta-designer-intelligence.git
+    cd insta-designer-intelligence
+    ```
 
+2. **Install dependencies**
 
-pip install -r requirements.txt
+    ```bash
+    pip install -r requirements.txt
+    ```
 
+3. **Set environment variables**
 
-apify_api=your_apify_api_token
-actor_id=your_apify_actor_id
-whatcms_api=your_whatcms_api_key
+    Create a `.env` file in the project root with the following contents:
 
+    ```env
+    apify_api=your_apify_api_token
+    actor_id=your_apify_actor_id
+    whatcms_api=your_whatcms_api_key
+    ```
 
+    Or set them in your terminal for a temporary session:
 
-streamlit run app.py
+    ```bash
+    export apify_api=your_apify_api_token
+    export actor_id=your_apify_actor_id
+    export whatcms_api=your_whatcms_api_key
+    ```
+
+4. **Run the Streamlit app**
+
+    ```bash
+    streamlit run app.py
+    ```
+
+---
+
+## 🧪 Example Use Cases
+
+- Analyze influencer engagement before marketing outreach.
+- Discover and verify designer brand official websites.
+- Identify technology stack used by eCommerce brands (e.g., Shopify, WooCommerce).
+- Build datasets of verified, high-engagement Instagram handles.
