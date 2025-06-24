@@ -11,147 +11,123 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium_stealth import stealth
+from urllib.parse import urljoin, urlparse
+from bs4 import BeautifulSoup
+import tldextract
 
 # --- API KEYS ---
 API_TOKEN = os.getenv("apify_api")
 ACTOR_ID = os.getenv("actor_id")
 WHATCMS_API = os.getenv("whatcms_api")
 
-# Create Selenium Driver
-def create_driver():
-    options = Options()
-    options.add_argument("--headless")
-    options.add_argument("--disable-blink-features=AutomationControlled")
-    options.add_argument("--disable-gpu")
-    options.add_argument("--no-sandbox")
-    options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
-    driver = webdriver.Chrome(options=options)
-    stealth(driver,
-        languages=["en-US", "en"],
-        vendor="Google Inc.",
-        platform="Win32",
-        webgl_vendor="Intel Inc.",
-        renderer="Intel Iris OpenGL Engine",
-        fix_hairline=True,
-    )
-    return driver
+# Constants for contact scraping
+HEADERS = {
+    'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64)'
+}
 
-# Engagement Rate Function
-def get_engagement_rate(username):
-    driver = create_driver()
+SOCIAL_DOMAINS = ['facebook.com', 'twitter.com', 'linkedin.com', 'instagram.com', 'youtube.com', 'pinterest.com']
+
+# --- Utility Functions for Contact Extraction ---
+def get_full_url(base_url, link):
+    return urljoin(base_url, link)
+
+def is_internal(base_url, link):
+    parsed_base = urlparse(base_url)
+    parsed_link = urlparse(link)
+    return (parsed_link.netloc == "" or parsed_link.netloc == parsed_base.netloc)
+
+def extract_contact_details(html):
+    soup = BeautifulSoup(html, 'html.parser')
+    text = soup.get_text(separator=' ', strip=True)
+    emails = list(set(re.findall(r'[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+', text)))
+    phones = list(set(re.findall(r'\+?\d[\d\s\-().]{8,}', text)))
+    social_links = []
+    for a in soup.find_all('a', href=True):
+        for domain in SOCIAL_DOMAINS:
+            if domain in a['href']:
+                social_links.append(a['href'])
+    return {
+        'emails': emails,
+        'phones': phones,
+        'social_links': list(set(social_links))
+    }
+
+def get_candidate_links(soup, base_url):
+    contact_keywords = ['contact', 'about', 'support', 'team']
+    links = set()
+    for a in soup.find_all('a', href=True):
+        href = a['href'].lower()
+        if any(word in href for word in contact_keywords):
+            full_url = get_full_url(base_url, a['href'])
+            if is_internal(base_url, full_url):
+                links.add(full_url)
+    return list(links)
+
+def scrape_website(base_url):
+    all_emails, all_phones, all_socials = set(), set(), set()
     try:
-        driver.get("https://www.clickanalytic.com/free-instagram-engagement-calculator/")
-
-        input_box = WebDriverWait(driver, 15).until(
-            EC.presence_of_element_located((By.ID, "username"))
-        )
-        input_box.clear()
-        input_box.send_keys(username)
-
-        submit_btn = WebDriverWait(driver, 10).until(
-            EC.element_to_be_clickable((By.XPATH, "//button[contains(text(), 'Check Engagement Rate')]"))
-        )
-        submit_btn.click()
-
-        WebDriverWait(driver, 20).until(lambda d: "%" in d.page_source)
-        time.sleep(3)
-
-        result_blocks = driver.find_elements(By.XPATH, "//div[contains(@class,'et_pb_text_inner')]")
-        for block in result_blocks:
-            if "%" in block.text:
-                match = re.search(r"\d+\.?\d*%", block.text)
-                if match:
-                    rate = match.group(0)
-                    driver.quit()
-                    return rate
-
-        driver.quit()
-        return "Engagement rate not found."
+        res = requests.get(base_url, headers=HEADERS, timeout=10)
+        res.raise_for_status()
     except Exception as e:
-        driver.quit()
-        return f"Error: {e}"
+        return None
+    soup = BeautifulSoup(res.text, 'html.parser')
+    data = extract_contact_details(res.text)
+    all_emails.update(data['emails'])
+    all_phones.update(data['phones'])
+    all_socials.update(data['social_links'])
+    internal_links = get_candidate_links(soup, base_url)
+    for link in internal_links:
+        try:
+            sub_res = requests.get(link, headers=HEADERS, timeout=10)
+            sub_res.raise_for_status()
+            data = extract_contact_details(sub_res.text)
+            all_emails.update(data['emails'])
+            all_phones.update(data['phones'])
+            all_socials.update(data['social_links'])
+        except:
+            continue
+    return {
+        'website': base_url,
+        'emails': list(all_emails),
+        'phones': list(all_phones),
+        'social_links': list(all_socials)
+    }
 
-# Poll for actor run completion
-def wait_for_actor_run(client, run_id, timeout=60):
-    start_time = time.time()
-    while time.time() - start_time < timeout:
-        run = client.run(run_id).get()
-        if run["status"] == "SUCCEEDED":
-            return run["defaultDatasetId"]
-        elif run["status"] in ["FAILED", "ABORTED", "TIMED-OUT"]:
-            raise Exception(f"Actor run failed with status: {run['status']}")
-        time.sleep(2)
-    raise TimeoutError("Apify actor run did not finish in time.")
+# ------------------ Streamlit UI ------------------
+st.set_page_config(page_title="Designer Contact Info Scraper", layout="centered")
+st.title("🔍 Designer Website Contact Scraper")
 
-# Apify Instagram Info Function (FIXED HERE)
-def fetch_instagram_info(usernames):
-    client = ApifyClient(API_TOKEN)
-    run = client.actor(ACTOR_ID).call(run_input={"usernames": usernames})
-  # Positional input
-    dataset_id = wait_for_actor_run(client, run["id"])
-    info = {}
-    for item in client.dataset(dataset_id).iterate_items():
-        u = item.get("username")
-        if u:
-            info[u] = item
-    return info
+# Input website URLs
+input_urls = st.text_area("Enter Website URLs (one per line)", height=200)
+urls = [url.strip() for url in input_urls.split("\n") if url.strip()]
 
+# Process URLs
+if st.button("Scrape Contact Info") and urls:
+    scraped_results = []
+    with st.spinner("Scraping websites..."):
+        for url in urls:
+            if not url.startswith("http"):
+                url = "https://" + url
+            result = scrape_website(url)
+            if result:
+                scraped_results.append(result)
 
-# DuckDuckGo Top 3 Links
-def fetch_top_links(query):
-    try:
-        driver = create_driver()
-        driver.get("https://html.duckduckgo.com/html/")
+    if scraped_results:
+        df = pd.DataFrame(scraped_results)
+        st.subheader("📄 Extracted Contact Information")
+        st.dataframe(df)
 
-        search_bar = WebDriverWait(driver, 10).until(
-            EC.presence_of_element_located((By.ID, "search_form_input_homepage"))
+        csv = df.to_csv(index=False).encode('utf-8')
+        st.download_button(
+            label="📥 Download CSV",
+            data=csv,
+            file_name="contact_details.csv",
+            mime="text/csv"
         )
-        search_bar.clear()
-        search_bar.send_keys(query)
-        driver.find_element(By.ID, "search_button_homepage").click()
+    else:
+        st.warning("No data was extracted from the provided URLs.")
 
-        # Wait for web-result blocks to appear
-        WebDriverWait(driver, 10).until(
-            EC.presence_of_all_elements_located((By.CSS_SELECTOR, "div.web-result"))
-        )
-        result_blocks = driver.find_elements(By.CSS_SELECTOR, "div.web-result")
-
-        top_links = []
-        for block in result_blocks:
-            anchor = block.find_element(By.CSS_SELECTOR, "a.result__url")
-            href = anchor.get_attribute("href")
-            if href and not any(domain in href for domain in ["instagram.com", "twitter.com", "x.com", "youtube.com", "youtu.be"]):
-                top_links.append(href)
-            if len(top_links) == 3:
-                break
-
-        driver.quit()
-        return top_links
-    except Exception as e:
-        driver.quit()
-        return [f"Error: {e}"]
-
-# WhatCMS Detection
-def detect_cms(url):
-    try:
-        response = requests.get(
-            "https://whatcms.org/APIEndpoint/Detect",
-            params={"key": WHATCMS_API, "url": url},
-            timeout=10
-        )
-        data = response.json()
-        if data.get("result", {}).get("code") == 200:
-            cms = data["result"].get("name", "Unknown")
-            confidence = data["result"].get("confidence", "N/A")
-            return cms, confidence
-        else:
-            return "Unknown", "N/A"
-    except Exception as e:
-        return f"Error: {e}", "N/A"
-
-# -------------------- Streamlit UI --------------------
-
-st.set_page_config(page_title="Instagram & Designer Info", layout="centered")
+# ------------------ Instagram & Designer Info Section ------------------
 st.title("🎯 Instagram & Designer Intelligence Tool")
 
 # Initialize session state
@@ -178,8 +154,15 @@ st.session_state["insta_usernames"] = st.text_area(
 if st.button("Fetch Instagram Info"):
     usernames = [u.strip().lstrip("@") for u in st.session_state["insta_usernames"].split(",") if u.strip()]
     if usernames:
-        info = fetch_instagram_info(usernames)
-        df = pd.DataFrame([{
+        client = ApifyClient(API_TOKEN)
+        run = client.actor(ACTOR_ID).call(run_input={"usernames": usernames})
+        dataset_id = run["defaultDatasetId"]
+        info = {}
+        for item in client.dataset(dataset_id).iterate_items():
+            u = item.get("username")
+            if u:
+                info[u] = item
+        df = pd.DataFrame([{ 
             "Username": u,
             "Full Name": info[u].get("fullName"),
             "Followers": info[u].get("followersCount"),
@@ -202,6 +185,53 @@ st.session_state["username"] = st.text_input(
     value=st.session_state["username"]
 )
 
+def get_engagement_rate(username):
+    driver = create_driver()
+    try:
+        driver.get("https://www.clickanalytic.com/free-instagram-engagement-calculator/")
+        input_box = WebDriverWait(driver, 15).until(
+            EC.presence_of_element_located((By.ID, "username"))
+        )
+        input_box.clear()
+        input_box.send_keys(username)
+        submit_btn = WebDriverWait(driver, 10).until(
+            EC.element_to_be_clickable((By.XPATH, "//button[contains(text(), 'Check Engagement Rate')]"))
+        )
+        submit_btn.click()
+        WebDriverWait(driver, 20).until(lambda d: "%" in d.page_source)
+        time.sleep(3)
+        result_blocks = driver.find_elements(By.XPATH, "//div[contains(@class,'et_pb_text_inner')]")
+        for block in result_blocks:
+            if "%" in block.text:
+                match = re.search(r"\d+\.?\d*%", block.text)
+                if match:
+                    rate = match.group(0)
+                    driver.quit()
+                    return rate
+        driver.quit()
+        return "Engagement rate not found."
+    except Exception as e:
+        driver.quit()
+        return f"Error: {e}"
+
+def create_driver():
+    options = Options()
+    options.add_argument("--headless")
+    options.add_argument("--disable-blink-features=AutomationControlled")
+    options.add_argument("--disable-gpu")
+    options.add_argument("--no-sandbox")
+    options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
+    driver = webdriver.Chrome(options=options)
+    stealth(driver,
+        languages=["en-US", "en"],
+        vendor="Google Inc.",
+        platform="Win32",
+        webgl_vendor="Intel Inc.",
+        renderer="Intel Iris OpenGL Engine",
+        fix_hairline=True,
+    )
+    return driver
+
 if st.button("Calculate Engagement Rate"):
     clean_user = st.session_state["username"].strip().lstrip("@")
     if clean_user:
@@ -217,13 +247,59 @@ st.session_state["designer_names"] = st.text_area(
     value=st.session_state["designer_names"]
 )
 
+from selenium.webdriver.common.by import By
+
+def fetch_top_links(query):
+    try:
+        driver = create_driver()
+        driver.get("https://html.duckduckgo.com/html/")
+        search_bar = WebDriverWait(driver, 10).until(
+            EC.presence_of_element_located((By.ID, "search_form_input_homepage"))
+        )
+        search_bar.clear()
+        search_bar.send_keys(query)
+        driver.find_element(By.ID, "search_button_homepage").click()
+        WebDriverWait(driver, 10).until(
+            EC.presence_of_all_elements_located((By.CSS_SELECTOR, "div.web-result"))
+        )
+        result_blocks = driver.find_elements(By.CSS_SELECTOR, "div.web-result")
+        top_links = []
+        for block in result_blocks:
+            anchor = block.find_element(By.CSS_SELECTOR, "a.result__url")
+            href = anchor.get_attribute("href")
+            if href and not any(domain in href for domain in ["instagram.com", "twitter.com", "x.com", "youtube.com", "youtu.be"]):
+                top_links.append(href)
+            if len(top_links) == 3:
+                break
+        driver.quit()
+        return top_links
+    except Exception as e:
+        driver.quit()
+        return [f"Error: {e}"]
+
+def detect_cms(url):
+    try:
+        response = requests.get(
+            "https://whatcms.org/APIEndpoint/Detect",
+            params={"key": WHATCMS_API, "url": url},
+            timeout=10
+        )
+        data = response.json()
+        if data.get("result", {}).get("code") == 200:
+            cms = data["result"].get("name", "Unknown")
+            confidence = data["result"].get("confidence", "N/A")
+            return cms, confidence
+        else:
+            return "Unknown", "N/A"
+    except Exception as e:
+        return f"Error: {e}", "N/A"
+
 if st.button("Search Designers"):
     names = [n.strip() for n in st.session_state["designer_names"].split("\n") if n.strip()]
     for name in names:
         links = fetch_top_links(f"{name} designer official website")
         st.session_state.search_results[name] = links
 
-# Show search results and CMS detection
 if "search_results" in st.session_state:
     for name, links in st.session_state.search_results.items():
         if links:
@@ -234,13 +310,17 @@ if "search_results" in st.session_state:
                 index=0
             )
             st.session_state.selected_links[name] = selected_link
-
             if (name, selected_link) not in st.session_state.cms_results:
                 cms, confidence = detect_cms(selected_link)
                 st.session_state.cms_results[(name, selected_link)] = (cms, confidence)
-
             cms, confidence = st.session_state.cms_results.get((name, selected_link), ("Unknown", "N/A"))
             st.write(f"*Selected Link:* [{selected_link}]({selected_link})")
             st.write(f"*CMS:* {cms} | *Confidence:* {confidence}")
+            if st.button(f"Scrape Contact for {name}", key=f"scrape_{name}"):
+                data = scrape_website(selected_link)
+                if data:
+                    st.write("📧 Emails:", data['emails'])
+                    st.write("📱 Phones:", data['phones'])
+                    st.write("🌐 Socials:", data['social_links'])
         else:
             st.warning(f"No valid links found for {name}.")
